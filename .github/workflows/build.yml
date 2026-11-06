@@ -1,0 +1,95 @@
+# Сборка APK из архива ArchonClient.zip, который лежит в корне репозитория.
+# Запуск: сам после каждой загрузки (commit) или вручную: Actions -> Build APK -> Run workflow.
+# Готовый APK - внизу страницы запуска, раздел Artifacts.
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Распаковка ArchonClient.zip
+        run: |
+          if [ ! -f ArchonClient.zip ]; then
+            echo "::error::В корне репозитория нет файла ArchonClient.zip. Загрузи его через Add file -> Upload files."
+            exit 1
+          fi
+          # -o: перезаписывать файлы без вопросов (из-за вопроса "replace?" сборка и падала)
+          rm -rf _src && mkdir _src
+          unzip -o -q ArchonClient.zip -d _src
+          # ищем папку проекта (где лежит settings.gradle.kts), неважно, есть ли в архиве папка ArchonClient
+          PROJ=$(dirname "$(find _src -name settings.gradle.kts -not -path '*/build/*' | head -1)")
+          if [ -z "$PROJ" ] || [ "$PROJ" = "." ]; then
+            echo "::error::В архиве не найден settings.gradle.kts - похоже, это не тот архив."
+            exit 1
+          fi
+          echo "Проект найден в: $PROJ"
+          echo "PROJ=$GITHUB_WORKSPACE/$PROJ" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Проверка секретов
+        env:
+          P0: ${{ secrets.ARCHON_KEYSTORE_BASE64 }}
+          P1: ${{ secrets.ARCHON_KEYSTORE_PASSWORD }}
+          P2: ${{ secrets.ARCHON_KEY_ALIAS }}
+          P3: ${{ secrets.ARCHON_KEY_PASSWORD }}
+        run: |
+          ok=1
+          for n in P0:ARCHON_KEYSTORE_BASE64 P1:ARCHON_KEYSTORE_PASSWORD P2:ARCHON_KEY_ALIAS P3:ARCHON_KEY_PASSWORD; do
+            v="${n%%:*}"; name="${n##*:}"
+            if [ -n "${!v}" ]; then echo "OK   $name"; else echo "НЕТ  $name"; ok=0; fi
+          done
+          if [ "$ok" = 0 ]; then
+            echo "::error::Не хватает секретов (см. список выше). Settings -> Secrets and variables -> Actions, имена должны совпадать буква в букву."
+            exit 1
+          fi
+
+      - name: Ключ подписи из Secrets
+        env:
+          KEYSTORE_B64: ${{ secrets.ARCHON_KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_B64" | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/release.jks" || {
+            echo "::error::Секрет ARCHON_KEYSTORE_BASE64 испорчен (не base64). Скопируй его заново целиком."
+            exit 1
+          }
+          echo "ARCHON_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Сборка APK
+        env:
+          ARCHON_KEYSTORE_PASSWORD: ${{ secrets.ARCHON_KEYSTORE_PASSWORD }}
+          ARCHON_KEY_ALIAS: ${{ secrets.ARCHON_KEY_ALIAS }}
+          ARCHON_KEY_PASSWORD: ${{ secrets.ARCHON_KEY_PASSWORD }}
+        working-directory: ${{ env.PROJ }}
+        run: gradle assembleRelease --no-daemon
+
+      - name: Проверка подписи APK
+        working-directory: ${{ env.PROJ }}
+        run: |
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          SIGNER=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner
+          "$SIGNER" verify --print-certs "$APK" | tee certs.txt
+          if grep -q "Android Debug" certs.txt; then
+            echo "::error::APK подписан отладочным ключом - секреты не сработали."
+            exit 1
+          fi
+          echo "::notice::APK подписан твоим ключом из Secrets: $(grep 'Signer #1 certificate DN' certs.txt)"
+          mkdir -p "$GITHUB_WORKSPACE/apk" && cp "$APK" "$GITHUB_WORKSPACE/apk/ArchonClient.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ArchonClient-APK
+          path: apk/ArchonClient.apk
