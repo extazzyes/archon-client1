@@ -31,7 +31,13 @@ jobs:
           fi
           echo "Проект найден в: $PROJ"
           echo "PROJ=$GITHUB_WORKSPACE/$PROJ" >> "$GITHUB_ENV"
-
+      - name: Какая версия собирается
+        run: |
+          V=$(grep -m1 versionName "$PROJ/app/build.gradle.kts")
+          N=$(grep -rl WorldBackupSettingsCard "$PROJ/app/src" | wc -l)
+          echo "$V"
+          echo "Файлов с тумблером копий: $N"
+          echo "### Собирается: $V. Файлов с тумблером: $N" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
